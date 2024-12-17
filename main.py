@@ -1,21 +1,18 @@
+import io
+from PIL import Image
 import gradio as gr
 import pandas as pd
 import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
-import io
-import base64
 
 class DataAnalysisApp:
     def __init__(self):
         self.original_data = None
         self.processed_data = None
-        self.current_data = None
+        self.merged_data = None
     
     def load_csv_files(self, activity_log, user_log, component_codes):
-        """
-        Load initial CSV files
-        """
         try:
             # Validate file uploads
             if not all([activity_log, user_log, component_codes]):
@@ -42,299 +39,198 @@ class DataAnalysisApp:
         except Exception as e:
             return f"Error loading files: {str(e)}", None, None, None
     
-    def clean_and_transform_data(self):
-        """
-        Apply data cleaning and transformation
-        """
+    def clean_and_merge_data(self):
         try:
             if not self.original_data:
-                return "Please load data first.", None
+                return "Please load the data first.", None
             
-            # 1. REMOVE: Remove System and Folder components
+            # Load data
             activity_log = self.original_data['activity'].copy()
-            activity_log = activity_log.rename(columns={'User Full Name *Anonymized': 'User_ID'})
-            activity_log = activity_log[~activity_log['Component'].isin(['System', 'Folder'])]
-            
-            # 2. Rename columns in user log
             user_log = self.original_data['user'].copy()
+            
+            # Rename columns
+            activity_log = activity_log.rename(columns={'User Full Name *Anonymized': 'User_ID'})
             user_log = user_log.rename(columns={'User Full Name *Anonymized': 'User_ID'})
             
-
-            # 3. Check for duplicate combinations
-            print("\nChecking for duplicate combinations:")
-            print("User Log unique User IDs:", user_log['User_ID'].nunique())
-            print("Activity Log unique User IDs:", activity_log['User_ID'].nunique())
-
-            # 4. Convert date columns to datetime, handling the time information
+            # Remove 'System' and 'Folder' components
+            activity_log = activity_log[~activity_log['Component'].isin(['System', 'Folder'])]
+            
+            # Convert date columns to datetime
             user_log['Date'] = pd.to_datetime(user_log['Date'].str.split().str[0], format='%d/%m/%Y')
-
-            # 5. Ensure unique combinations in activity log
+            
+            # Drop duplicates
             activity_log = activity_log.drop_duplicates(subset=['User_ID', 'Component', 'Action', 'Target'])
-
-            # 6. Ensure unique combinations in user log
             user_log = user_log.drop_duplicates(subset=['Date', 'Time', 'User_ID'])
-
-            # 7. Merge and process data
+            
+            # Merge data
             merged_data = user_log.merge(activity_log, on='User_ID', how='left')
             merged_data['Month'] = merged_data['Date'].dt.to_period('M')
-
-            # 8. Count interactions
-            interaction_counts = merged_data.groupby(['User_ID', 'Component', 'Month']).size().reset_index(name='Interaction_Count')
-
-            # 9. Pivot the data
-            pivoted_data = interaction_counts.pivot_table(
-                index=['User_ID', 'Month'], 
-                columns='Component', 
-                values='Interaction_Count', 
-                fill_value=0
-            ).reset_index()
-
-            # 10. Flatten column names
-            pivoted_data.columns.name = None
-            pivoted_data = pivoted_data.rename(
-                columns={col: f'{col}_Interactions' if col not in ['User_ID', 'Month'] else col for col in pivoted_data.columns}
-            )
-
-            # 11. Convert Month to string
-            pivoted_data['Month'] = pivoted_data['Month'].astype(str)
-
-            # 12. Store processed data
-            self.processed_data = pivoted_data
-            self.current_data = pivoted_data
-
-            return "Data processed successfully!", pivoted_data.head().to_html()
-
+            
+            self.merged_data = merged_data
+            return "Data cleaned and merged successfully!", merged_data.head().to_html()
         except Exception as e:
-            return f"Error processing data: {str(e)}", None
-    
-    def generate_statistics(self, columns_to_analyze, stat_type):
-        """
-        Generate descriptive statistics
-        """
+            return f"Error during data processing: {str(e)}", None
+        
+    def generate_statistics(self, target_components):
         try:
-            if self.current_data is None:
+            if self.merged_data is None:
                 return "Please process data first.", None
             
-            # Validate columns
-            available_columns = self.current_data.columns.tolist()
-            columns_to_analyze = [col for col in columns_to_analyze if col in available_columns]
+            # Filter for target components
+            filtered_data = self.merged_data[self.merged_data['Component'].isin(target_components)]
             
-            if not columns_to_analyze:
-                return "No valid columns selected.", None
+            # Add Month column
+            filtered_data['Month'] = filtered_data['Date'].dt.to_period('M')
             
-            # Generate statistics based on type
-            if stat_type == 'Descriptive':
-                stats = self.current_data[columns_to_analyze].describe()
-            elif stat_type == 'Correlation':
-                stats = self.current_data[columns_to_analyze].corr()
+            # Overall semester statistics
+            semester_stats = {}
+            for component in target_components:
+                comp_data = filtered_data[filtered_data['Component'] == component]
+                semester_interactions = comp_data.groupby('Month').size()
+                semester_stats[component] = {
+                    'mean': semester_interactions.mean(),
+                    'median': semester_interactions.median(),
+                    'mode': semester_interactions.mode().values[0] if not semester_interactions.mode().empty else np.nan
+                }
             
-            return f"{stat_type} Statistics", stats.to_html()
+            semester_stats_df = pd.DataFrame(semester_stats).T.reset_index().rename(columns={'index': 'Component'})
+            
+            # Monthly statistics
+            monthly_stats = {}
+            for component in target_components:
+                comp_data = filtered_data[filtered_data['Component'] == component]
+                
+                # Group by Month and compute metrics for each month
+                for month, month_data in comp_data.groupby('Month'):
+                    if month not in monthly_stats:
+                        monthly_stats[month] = {}
+                    
+                    # Count interactions for the month
+                    monthly_interactions = month_data.groupby('Component').size()
+                    
+                    # Compute statistics for this component in this month
+                    monthly_stats[month][component] = {
+                        'mean': monthly_interactions.mean(),
+                        'median': monthly_interactions.median(),
+                        'mode': monthly_interactions.mode().values[0] if len(monthly_interactions.mode()) > 0 else np.nan
+                    }
+
+            # Flatten the monthly statistics dictionary
+            flattened_stats = []
+            for month, components in monthly_stats.items():
+                for component, metrics in components.items():
+                    flattened_stats.append({'Month': month, 'Component': component, **metrics})
+            
+            monthly_stats_df = pd.DataFrame(flattened_stats)
+            
+            # Return both semester and monthly statistics as HTML
+            semester_html = semester_stats_df.to_html()
+            monthly_html = monthly_stats_df.to_html()
+
+            data = "Semester statistics:\n\n" + semester_html + "Monthly statistics: \n\n\n" + monthly_html
+            return "Statistics generated successfully:", data
+        
         except Exception as e:
             return f"Error generating statistics: {str(e)}", None
     
-    def generate_visualization(self, x_column, y_column, plot_type):
-        """
-        Generate visualizations
-        """
+    def generate_correlation_heatmap(self, target_components):
         try:
-            if self.current_data is None:
+            if self.merged_data is None:
                 return "Please process data first.", None
             
-            # Clear any existing plots
-            plt.clf()
+            # Filter for target components
+            filtered_data = self.merged_data[self.merged_data['Component'].isin(target_components)]
             
-            # Create plot based on type
-            if plot_type == 'Scatter':
-                plt.figure(figsize=(10, 6))
-                plt.scatter(self.current_data[x_column], self.current_data[y_column])
-                plt.xlabel(x_column)
-                plt.ylabel(y_column)
-                plt.title(f'Scatter Plot: {x_column} vs {y_column}')
+            # Create interaction matrix
+            interaction_matrix = filtered_data.pivot_table(
+                index='User_ID', columns='Component', aggfunc='size', fill_value=0)
             
-            elif plot_type == 'Line':
-                plt.figure(figsize=(10, 6))
-                self.current_data.groupby('Month')[y_column].mean().plot(kind='line')
-                plt.xlabel('Month')
-                plt.ylabel(y_column)
-                plt.title(f'Line Plot: Average {y_column} by Month')
+            # Calculate correlation matrix
+            correlation_matrix = interaction_matrix.corr()
+            print(f"correlation_matrix: {correlation_matrix}")
             
-            elif plot_type == 'Histogram':
-                plt.figure(figsize=(10, 6))
-                plt.hist(self.current_data[y_column], bins=20)
-                plt.xlabel(y_column)
-                plt.ylabel('Frequency')
-                plt.title(f'Histogram of {y_column}')
+            # Plot heatmap
+            plt.figure(figsize=(10, 8))
+            sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm')
+            plt.title("Component Interaction Correlation Heatmap")
+            plt.tight_layout()  # Adjust layout to prevent cut-off labels
+
+            save_path = "/home/kamikaze/Documents/projects/data-analysis-system/heatmap.png"
+            try:
+                plt.savefig(save_path, bbox_inches='tight')
+                print(f"Heatmap saved to {save_path}")
+            except Exception as e:
+                print(f"Error saving heatmap: {e}")
             
-            # Convert plot to base64 for Gradio
-            buffer = io.BytesIO()
-            plt.savefig(buffer, format='png')
-            buffer.seek(0)
-            image_base64 = base64.b64encode(buffer.getvalue()).decode()
-            
-            return "Visualization generated!", f"data:image/png;base64,{image_base64}"
+            # # Save plot as a temporary image.
+            # plt.savefig("./heatmap.png")
+            plt.close()
+            return save_path
         except Exception as e:
-            return f"Error generating visualization: {str(e)}", None
-    
-    def filter_data(self, filter_column, min_val, max_val):
-        """
-        Filter data based on specified range
-        """
-        try:
-            if self.processed_data is None:
-                return "Please process data first.", None
-            
-            # Filter data
-            filtered_data = self.processed_data[
-                (self.processed_data[filter_column] >= min_val) & 
-                (self.processed_data[filter_column] <= max_val)
-            ]
-            
-            # Update current data
-            self.current_data = filtered_data
-            
-            return "Data filtered successfully!", filtered_data.head().to_html()
-        except Exception as e:
-            return f"Error filtering data: {str(e)}", None
+            return f"Error generating heatmap: {str(e)}", None
 
 def create_gradio_interface():
-    """
-    Create Gradio interface for the data analysis application
-    """
-    # Initialize the application
     app = DataAnalysisApp()
     
-    # Create Gradio interface
     with gr.Blocks() as demo:
         gr.Markdown("# Data Analysis Application")
         
-        # Data Loading Tab
         with gr.Tab("Load Data"):
-            with gr.Row():
-                activity_log = gr.File(label="Activity Log CSV")
-                user_log = gr.File(label="User Log CSV")
-                component_codes = gr.File(label="Component Codes CSV")
-            
+            activity_file = gr.File(label="Upload Activity Log CSV")
+            user_file = gr.File(label="Upload User Log CSV")
+            component_file = gr.File(label="Upload Component Codes CSV")
             load_btn = gr.Button("Load Files")
             load_output = gr.Markdown()
+            activity_preview = gr.HTML()
+            user_preview = gr.HTML()
+            component_preview = gr.HTML()
             
-            # Data Preview
-            with gr.Accordion("Data Preview", open=False):
-                activity_preview = gr.HTML()
-                user_preview = gr.HTML()
-                component_preview = gr.HTML()
-            
-            # Load Files Event
             load_btn.click(
                 app.load_csv_files, 
-                inputs=[activity_log, user_log, component_codes],
+                inputs=[activity_file, user_file, component_file],
                 outputs=[load_output, activity_preview, user_preview, component_preview]
             )
         
-        # Data Processing Tab
-        with gr.Tab("Process Data"):
-            process_btn = gr.Button("Clean and Transform Data")
+        with gr.Tab("Clean and Merge Data"):
+            process_btn = gr.Button("Clean and Merge Data")
             process_output = gr.Markdown()
-            process_preview = gr.HTML()
-            
+            merged_preview = gr.HTML()
             process_btn.click(
-                app.clean_and_transform_data, 
-                outputs=[process_output, process_preview]
+                app.clean_and_merge_data, 
+                outputs=[process_output, merged_preview]
             )
         
-        # Data Analysis Tab
-        with gr.Tab("Analyze Data"):
-            # Statistics Section
-            with gr.Group():
-                gr.Markdown("## Generate Statistics")
-                stat_columns = gr.Dropdown(
-                    label="Select Columns", 
-                    multiselect=True,
-                    choices=[]  # Will be populated dynamically
-                )
-                stat_type = gr.Dropdown(
-                    label="Statistics Type", 
-                    choices=['Descriptive', 'Correlation']
-                )
-                stat_btn = gr.Button("Generate Statistics")
-                stat_output = gr.HTML()
-                
-                # Update column choices when data is processed
-                process_btn.click(
-                    lambda: gr.Dropdown(choices=app.processed_data.columns.tolist() if app.processed_data is not None else []),
-                    outputs=[stat_columns]
-                )
-            
-            # Visualization Section
-            with gr.Group():
-                gr.Markdown("## Generate Visualizations")
-                x_column = gr.Dropdown(
-                    label="X-Axis Column", 
-                    choices=[]  # Will be populated dynamically
-                )
-                y_column = gr.Dropdown(
-                    label="Y-Axis Column", 
-                    choices=[]  # Will be populated dynamically
-                )
-                plot_type = gr.Dropdown(
-                    label="Plot Type", 
-                    choices=['Scatter', 'Line', 'Histogram']
-                )
-                plot_btn = gr.Button("Generate Visualization")
-                plot_output = gr.Markdown()
-                plot_image = gr.Image()
-                
-                # Update column choices when data is processed
-                process_btn.click(
-                    lambda: (
-                        gr.Dropdown(choices=app.processed_data.columns.tolist() if app.processed_data is not None else []),
-                        gr.Dropdown(choices=app.processed_data.columns.tolist() if app.processed_data is not None else [])
-                    ),
-                    outputs=[x_column, y_column]
-                )
-            
-            # Statistics Generation Event
-            stat_btn.click(
-                app.generate_statistics,
-                inputs=[stat_columns, stat_type],
-                outputs=[plot_output, stat_output]
+        with gr.Tab("Generate Statistics"):
+            components = gr.CheckboxGroup(
+                label="Select Components", 
+                choices=['Quiz', 'Lecture', 'Assignment', 'Attendence', 'Survey']
             )
-            
-            # Visualization Generation Event
-            plot_btn.click(
-                app.generate_visualization,
-                inputs=[x_column, y_column, plot_type],
-                outputs=[plot_output, plot_image]
+            stats_btn = gr.Button("Generate Statistics")
+            stats_output = gr.Markdown()
+            stats_table = gr.HTML()
+            stats_btn.click(
+                app.generate_statistics, 
+                inputs=[components], 
+                outputs=[stats_output, stats_table]
             )
         
-        # Data Filtering Tab
-        with gr.Tab("Filter Data"):
-            gr.Markdown("## Filter Processed Data")
-            filter_column = gr.Dropdown(
-                label="Column to Filter", 
-                choices=[]  # Will be populated dynamically
+        with gr.Tab("Generate Heatmap"):
+            gr.Markdown("### Generate a Heatmap with Component Correlations")
+
+            # Textbox input for target components (comma-separated)
+            components_input = gr.Textbox(label="Target Components", value="Quiz,Lecture,Assignment,Attendence,Survey")
+            output = gr.Image(label="Correlation Heatmap")
+            btn = gr.Button("Generate Heatmap")
+
+            # Button click event
+            btn.click(
+                fn=lambda components: app.generate_correlation_heatmap(components.split(',')),
+                inputs=components_input,
+                outputs=output
             )
-            min_val = gr.Number(label="Minimum Value")
-            max_val = gr.Number(label="Maximum Value")
-            filter_btn = gr.Button("Apply Filter")
-            filter_output = gr.Markdown()
-            filter_preview = gr.HTML()
-            
-            # Update column choices when data is processed
-            process_btn.click(
-                lambda: gr.Dropdown(choices=app.processed_data.columns.tolist() if app.processed_data is not None else []),
-                outputs=[filter_column]
-            )
-            
-            # Filter Data Event
-            filter_btn.click(
-                app.filter_data,
-                inputs=[filter_column, min_val, max_val],
-                outputs=[filter_output, filter_preview]
-            )
-    
+
     return demo
 
-# Launch the Gradio interface
 if __name__ == "__main__":
     demo = create_gradio_interface()
     demo.launch(debug=True)
