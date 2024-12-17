@@ -59,38 +59,51 @@ class DataAnalysisApp:
             user_log = self.original_data['user'].copy()
             user_log = user_log.rename(columns={'User Full Name *Anonymized': 'User_ID'})
             
-            # 3. Convert dates
+
+            # 3. Check for duplicate combinations
+            print("\nChecking for duplicate combinations:")
+            print("User Log unique User IDs:", user_log['User_ID'].nunique())
+            print("Activity Log unique User IDs:", activity_log['User_ID'].nunique())
+
+            # 4. Convert date columns to datetime, handling the time information
             user_log['Date'] = pd.to_datetime(user_log['Date'].str.split().str[0], format='%d/%m/%Y')
-            
-            # 4. Merge and process data
+
+            # 5. Ensure unique combinations in activity log
+            activity_log = activity_log.drop_duplicates(subset=['User_ID', 'Component', 'Action', 'Target'])
+
+            # 6. Ensure unique combinations in user log
+            user_log = user_log.drop_duplicates(subset=['Date', 'Time', 'User_ID'])
+
+            # 7. Merge and process data
             merged_data = user_log.merge(activity_log, on='User_ID', how='left')
             merged_data['Month'] = merged_data['Date'].dt.to_period('M')
-            
-            # 5. Count interactions
+
+            # 8. Count interactions
             interaction_counts = merged_data.groupby(['User_ID', 'Component', 'Month']).size().reset_index(name='Interaction_Count')
-            
-            # 6. Pivot the data
+
+            # 9. Pivot the data
             pivoted_data = interaction_counts.pivot_table(
                 index=['User_ID', 'Month'], 
                 columns='Component', 
                 values='Interaction_Count', 
                 fill_value=0
             ).reset_index()
-            
-            # Flatten column names
+
+            # 10. Flatten column names
             pivoted_data.columns.name = None
             pivoted_data = pivoted_data.rename(
                 columns={col: f'{col}_Interactions' if col not in ['User_ID', 'Month'] else col for col in pivoted_data.columns}
             )
-            
-            # Convert Month to string
+
+            # 11. Convert Month to string
             pivoted_data['Month'] = pivoted_data['Month'].astype(str)
-            
-            # Store processed data
+
+            # 12. Store processed data
             self.processed_data = pivoted_data
             self.current_data = pivoted_data
-            
+
             return "Data processed successfully!", pivoted_data.head().to_html()
+
         except Exception as e:
             return f"Error processing data: {str(e)}", None
     
